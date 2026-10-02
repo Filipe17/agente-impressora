@@ -69,10 +69,10 @@ CMD_NEGRITO_OFF  = ESC + b'E\x00'
 CMD_CENTRALIZAR  = ESC + b'a\x01'
 CMD_ESQUERDA     = ESC + b'a\x00'
 CMD_LINHA        = b'\n'
-# Tamanho de fonte
-CMD_FONTE_NORMAL = GS  + b'!\x00'      # Fonte normal
-CMD_FONTE_GRANDE = GS  + b'!\x11'      # Dupla largura + dupla altura
-CMD_FONTE_MEDIA  = GS  + b'!\x10'      # Dupla altura apenas
+# Tamanho de fonte via ESC ! (mais compatível com térmicas genéricas)
+CMD_FONTE_NORMAL = ESC + b'!\x00'      # Fonte normal
+CMD_FONTE_GRANDE = ESC + b'!\x38'      # Dupla largura + dupla altura + negrito
+CMD_FONTE_MEDIA  = ESC + b'!\x10'      # Dupla altura
 
 COLUNAS = 48 if PAPEL == '80mm' else 32
 
@@ -87,15 +87,7 @@ SO = platform.system()   # 'Windows', 'Linux', 'Darwin'
 # ══════════════════════════════════════════════════════════════
 
 def _montar_bytes(texto: str) -> bytes:
-    """Converte texto puro em bytes ESC/POS prontos para imprimir.
-
-    Regras de formatação por conteúdo da linha:
-    - Separadores (=== --- ***) → centralizado + negrito
-    - PARA ENTREGA / BALCAO / MESA → centralizado + negrito + fonte normal
-    - Pedido XXXX / Pedido #XXXX  → centralizado + negrito + fonte GRANDE
-    - Itens / Cliente / Pagamento → negrito + fonte média
-    - Restante                    → esquerda + fonte normal
-    """
+    """Converte texto puro em bytes ESC/POS prontos para imprimir."""
     import re as _re
 
     buf = bytearray()
@@ -107,49 +99,59 @@ def _montar_bytes(texto: str) -> bytes:
     for linha in linhas:
         stripped = linha.strip()
 
-        # ── Separadores ───────────────────────────────────────
+        # ── Separadores (=== --- ***) → centralizado ──────────
         if stripped and all(c in ('*', '-', '=') for c in stripped):
             buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON + CMD_FONTE_NORMAL
-            buf += (linha + '\n').encode('cp850', errors='replace')
-            buf += CMD_NEGRITO_OFF + CMD_ESQUERDA + CMD_FONTE_NORMAL
-
-        # ── Número do pedido — fonte GRANDE ───────────────────
-        elif _re.match(r'^\s*Pedido\s+[#P\d]', stripped):
-            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON + CMD_FONTE_GRANDE
             buf += (stripped + '\n').encode('cp850', errors='replace')
             buf += CMD_NEGRITO_OFF + CMD_ESQUERDA + CMD_FONTE_NORMAL
 
-        # ── Tipo do pedido (PARA ENTREGA, MESA, BALCAO) ───────
-        elif _re.match(r'^\s*(PARA ENTREGA|BALCAO|MESA|COZINHA)', stripped):
+        # ── Número do pedido → fonte GRANDE + centralizado ────
+        elif _re.match(r'^\s*Pedido\s+', stripped):
+            buf += CMD_CENTRALIZAR + CMD_FONTE_GRANDE
+            buf += (stripped + '\n').encode('cp850', errors='replace')
+            buf += CMD_FONTE_NORMAL + CMD_ESQUERDA
+
+        # ── Tipo (PARA ENTREGA, MESA X, BALCAO) → centralizado + negrito
+        elif _re.match(r'^\s*(PARA ENTREGA|BALCAO|MESA\s|COZINHA)', stripped):
             buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON + CMD_FONTE_NORMAL
             buf += (stripped + '\n').encode('cp850', errors='replace')
             buf += CMD_NEGRITO_OFF + CMD_ESQUERDA + CMD_FONTE_NORMAL
 
-        # ── Seções (Itens, Cliente, Pagamento) — fonte média ──
+        # ── Seções (Itens, Cliente, Pagamento) → negrito ──────
         elif stripped in ('Itens', 'Cliente', 'Pagamento'):
-            buf += CMD_NEGRITO_ON + CMD_FONTE_MEDIA
-            buf += (linha + '\n').encode('cp850', errors='replace')
+            buf += CMD_NEGRITO_ON + CMD_FONTE_NORMAL
+            buf += (stripped + '\n').encode('cp850', errors='replace')
             buf += CMD_NEGRITO_OFF + CMD_FONTE_NORMAL
 
-        # ── Data, entrega prevista, nome da loja — centralizado
-        elif _re.match(r'^\d{2}/\d{2}/\d{4}', stripped) or \
-             stripped.startswith('Entrega prevista') or \
-             (stripped and not any(c in stripped for c in (':', 'R$')) and len(stripped) < 35 and stripped == stripped):
-            # Centraliza linhas curtas de cabeçalho (data, nome da loja)
-            if _re.match(r'^\d{2}/\d{2}/\d{4}', stripped) or stripped.startswith('Entrega prevista'):
-                buf += CMD_CENTRALIZAR
-                buf += (linha + '\n').encode('cp850', errors='replace')
-                buf += CMD_ESQUERDA
-            else:
-                buf += (linha + '\n').encode('cp850', errors='replace')
+        # ── Data → centralizado ───────────────────────────────
+        elif _re.match(r'^\d{2}/\d{2}/\d{4}', stripped):
+            buf += CMD_CENTRALIZAR
+            buf += (stripped + '\n').encode('cp850', errors='replace')
+            buf += CMD_ESQUERDA
 
-        # ── Total em destaque ─────────────────────────────────
+        # ── Entrega prevista → centralizado ───────────────────
+        elif stripped.startswith('Entrega prevista'):
+            buf += CMD_CENTRALIZAR
+            buf += (stripped + '\n').encode('cp850', errors='replace')
+            buf += CMD_ESQUERDA
+
+        # ── Nome da loja → centralizado ───────────────────────
+        elif stripped.startswith('Na hora') or (
+            stripped and len(stripped) < 40
+            and not any(c in stripped for c in (':', 'R$', '+', '-'))
+            and _re.match(r'^[A-Za-z\s]+$', stripped)
+        ):
+            buf += CMD_CENTRALIZAR
+            buf += (stripped + '\n').encode('cp850', errors='replace')
+            buf += CMD_ESQUERDA
+
+        # ── Total → negrito ───────────────────────────────────
         elif stripped.startswith('Total:') or stripped.startswith('TOTAL:'):
             buf += CMD_NEGRITO_ON
             buf += (linha + '\n').encode('cp850', errors='replace')
             buf += CMD_NEGRITO_OFF
 
-        # ── Cobrar do cliente — centralizado + negrito ────────
+        # ── Cobrar do cliente → centralizado + negrito ────────
         elif '* Cobrar do cliente *' in stripped:
             buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON
             buf += (stripped + '\n').encode('cp850', errors='replace')
@@ -157,6 +159,7 @@ def _montar_bytes(texto: str) -> bytes:
 
         # ── Normal ────────────────────────────────────────────
         else:
+            buf += CMD_FONTE_NORMAL
             buf += (linha + '\n').encode('cp850', errors='replace')
 
     # Espaço e corte

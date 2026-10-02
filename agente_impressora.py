@@ -69,6 +69,10 @@ CMD_NEGRITO_OFF  = ESC + b'E\x00'
 CMD_CENTRALIZAR  = ESC + b'a\x01'
 CMD_ESQUERDA     = ESC + b'a\x00'
 CMD_LINHA        = b'\n'
+# Tamanho de fonte
+CMD_FONTE_NORMAL = GS  + b'!\x00'      # Fonte normal
+CMD_FONTE_GRANDE = GS  + b'!\x11'      # Dupla largura + dupla altura
+CMD_FONTE_MEDIA  = GS  + b'!\x10'      # Dupla altura apenas
 
 COLUNAS = 48 if PAPEL == '80mm' else 32
 
@@ -83,24 +87,75 @@ SO = platform.system()   # 'Windows', 'Linux', 'Darwin'
 # ══════════════════════════════════════════════════════════════
 
 def _montar_bytes(texto: str) -> bytes:
-    """Converte texto puro em bytes ESC/POS prontos para imprimir."""
+    """Converte texto puro em bytes ESC/POS prontos para imprimir.
+
+    Regras de formatação por conteúdo da linha:
+    - Separadores (=== --- ***) → centralizado + negrito
+    - PARA ENTREGA / BALCAO / MESA → centralizado + negrito + fonte normal
+    - Pedido XXXX / Pedido #XXXX  → centralizado + negrito + fonte GRANDE
+    - Itens / Cliente / Pagamento → negrito + fonte média
+    - Restante                    → esquerda + fonte normal
+    """
+    import re as _re
+
     buf = bytearray()
     buf += CMD_INIT
     buf += CMD_ESQUERDA
+    buf += CMD_FONTE_NORMAL
 
     linhas = texto.splitlines()
     for linha in linhas:
-        # Linhas de asteriscos ou traços → negrito + centralizado
         stripped = linha.strip()
+
+        # ── Separadores ───────────────────────────────────────
         if stripped and all(c in ('*', '-', '=') for c in stripped):
-            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON
+            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON + CMD_FONTE_NORMAL
             buf += (linha + '\n').encode('cp850', errors='replace')
-            buf += CMD_NEGRITO_OFF + CMD_ESQUERDA
-        # Linhas de cabeçalho (COZINHA / PREPARO, PEDIDO #...) → negrito
-        elif stripped.startswith(('COZINHA', 'PEDIDO #', 'Pedido #')):
-            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON
+            buf += CMD_NEGRITO_OFF + CMD_ESQUERDA + CMD_FONTE_NORMAL
+
+        # ── Número do pedido — fonte GRANDE ───────────────────
+        elif _re.match(r'^\s*Pedido\s+[#P\d]', stripped):
+            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON + CMD_FONTE_GRANDE
+            buf += (stripped + '\n').encode('cp850', errors='replace')
+            buf += CMD_NEGRITO_OFF + CMD_ESQUERDA + CMD_FONTE_NORMAL
+
+        # ── Tipo do pedido (PARA ENTREGA, MESA, BALCAO) ───────
+        elif _re.match(r'^\s*(PARA ENTREGA|BALCAO|MESA|COZINHA)', stripped):
+            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON + CMD_FONTE_NORMAL
+            buf += (stripped + '\n').encode('cp850', errors='replace')
+            buf += CMD_NEGRITO_OFF + CMD_ESQUERDA + CMD_FONTE_NORMAL
+
+        # ── Seções (Itens, Cliente, Pagamento) — fonte média ──
+        elif stripped in ('Itens', 'Cliente', 'Pagamento'):
+            buf += CMD_NEGRITO_ON + CMD_FONTE_MEDIA
             buf += (linha + '\n').encode('cp850', errors='replace')
+            buf += CMD_NEGRITO_OFF + CMD_FONTE_NORMAL
+
+        # ── Data, entrega prevista, nome da loja — centralizado
+        elif _re.match(r'^\d{2}/\d{2}/\d{4}', stripped) or \
+             stripped.startswith('Entrega prevista') or \
+             (stripped and not any(c in stripped for c in (':', 'R$')) and len(stripped) < 35 and stripped == stripped):
+            # Centraliza linhas curtas de cabeçalho (data, nome da loja)
+            if _re.match(r'^\d{2}/\d{2}/\d{4}', stripped) or stripped.startswith('Entrega prevista'):
+                buf += CMD_CENTRALIZAR
+                buf += (linha + '\n').encode('cp850', errors='replace')
+                buf += CMD_ESQUERDA
+            else:
+                buf += (linha + '\n').encode('cp850', errors='replace')
+
+        # ── Total em destaque ─────────────────────────────────
+        elif stripped.startswith('Total:') or stripped.startswith('TOTAL:'):
+            buf += CMD_NEGRITO_ON
+            buf += (linha + '\n').encode('cp850', errors='replace')
+            buf += CMD_NEGRITO_OFF
+
+        # ── Cobrar do cliente — centralizado + negrito ────────
+        elif '* Cobrar do cliente *' in stripped:
+            buf += CMD_CENTRALIZAR + CMD_NEGRITO_ON
+            buf += (stripped + '\n').encode('cp850', errors='replace')
             buf += CMD_NEGRITO_OFF + CMD_ESQUERDA
+
+        # ── Normal ────────────────────────────────────────────
         else:
             buf += (linha + '\n').encode('cp850', errors='replace')
 
